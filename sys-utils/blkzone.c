@@ -46,8 +46,16 @@
 
 struct blkzone_control;
 
+#define BLKOPENZONE     _IOW(0x12, 134, struct blk_zone_range)
+#define BLKCLOSEZONE    _IOW(0x12, 135, struct blk_zone_range)
+#define BLKFINISHZONE   _IOW(0x12, 136, struct blk_zone_range)
+
 static int blkzone_report(struct blkzone_control *ctl);
 static int blkzone_reset(struct blkzone_control *ctl);
+static int blkzone_open(struct blkzone_control *ctl);
+static int blkzone_close(struct blkzone_control *ctl);
+static int blkzone_finish(struct blkzone_control *ctl);
+static int blkzone_action(struct blkzone_control *ctl);
 
 struct blkzone_command {
 	const char *name;
@@ -65,13 +73,17 @@ struct blkzone_control {
 	uint64_t offset;
 	uint64_t length;
 	uint32_t count;
+	uint32_t action;
 
 	unsigned int verbose : 1;
 };
 
 static const struct blkzone_command commands[] = {
 	{ "report",	blkzone_report, N_("Report zone information about the given device") },
-	{ "reset",	blkzone_reset,  N_("Reset a range of zones.") }
+	{ "reset",	blkzone_reset,  N_("Reset a range of zones.") },
+	{ "open",	blkzone_open,   N_("Open a range of zones.") },
+	{ "close",	blkzone_close,  N_("Close a range of zones.") },
+	{ "finish",	blkzone_finish, N_("Set a range of zones to Full.") }
 };
 
 static const struct blkzone_command *name_to_command(const char *name)
@@ -236,10 +248,43 @@ static int blkzone_report(struct blkzone_control *ctl)
 	return 0;
 }
 
-/*
- * blkzone reset
- */
+enum zone_action {
+	BLK_ZONE_NO_ACTION = 0,
+	BLK_ZONE_OPEN      = 1,
+	BLK_ZONE_CLOSE     = 2,
+	BLK_ZONE_FINISH    = 3,
+	BLK_ZONE_RESET     = 4,
+};
+
+static int blkzone_open(struct blkzone_control *ctl)
+{
+	ctl->action = BLK_ZONE_OPEN;
+	return blkzone_action(ctl);
+}
+
+static int blkzone_close(struct blkzone_control *ctl)
+{
+	ctl->action = BLK_ZONE_CLOSE;
+	return blkzone_action(ctl);
+}
+
+static int blkzone_finish(struct blkzone_control *ctl)
+{
+	ctl->action = BLK_ZONE_FINISH;
+	return blkzone_action(ctl);
+}
+
 static int blkzone_reset(struct blkzone_control *ctl)
+{
+	ctl->action = BLK_ZONE_RESET;
+	return blkzone_action(ctl);
+}
+
+/*
+ * blkzone reset, open, close, and finish.
+ */
+
+static int blkzone_action(struct blkzone_control *ctl)
 {
 	struct blk_zone_range za = { .sector = 0 };
 	unsigned long zonesize;
@@ -279,13 +324,40 @@ static int blkzone_reset(struct blkzone_control *ctl)
 	za.sector = ctl->offset;
 	za.nr_sectors = zlen;
 
-	if (ioctl(fd, BLKRESETZONE, &za) == -1)
-		err(EXIT_FAILURE, _("%s: BLKRESETZONE ioctl failed"), ctl->devname);
-	else if (ctl->verbose)
-		printf(_("%s: successfully reset in range from %" PRIu64 ", to %" PRIu64),
-			ctl->devname,
-			ctl->offset,
-			ctl->offset + zlen);
+	switch (ctl->action) {
+	case BLK_ZONE_OPEN:
+		if (ioctl(fd, BLKOPENZONE, &za) == -1)
+			err(EXIT_FAILURE, _("%s: BLKOPENZONE ioctl failed"), ctl->devname);
+		else if (ctl->verbose)
+			printf(_("%s: successfully opened in range from %" PRIu64 ", to %" PRIu64 "\n"),
+				ctl->devname, ctl->offset, ctl->offset + zlen);
+		break;
+	case BLK_ZONE_CLOSE:
+		if (ioctl(fd, BLKCLOSEZONE, &za) == -1)
+			err(EXIT_FAILURE, _("%s: BLKCLOSEZONE ioctl failed"), ctl->devname);
+		else if (ctl->verbose)
+			printf(_("%s: successfully closed in range from %" PRIu64 ", to %" PRIu64 "\n"),
+				ctl->devname, ctl->offset, ctl->offset + zlen);
+		break;
+	case BLK_ZONE_FINISH:
+		if (ioctl(fd, BLKFINISHZONE, &za) == -1)
+			err(EXIT_FAILURE, _("%s: BLKFINISHZONE ioctl failed"), ctl->devname);
+		else if (ctl->verbose)
+			printf(_("%s: successfully set the zones to full state in range from %" PRIu64 ", to %" PRIu64 "\n"),
+				ctl->devname, ctl->offset, ctl->offset + zlen);
+		break;
+	case BLK_ZONE_RESET:
+		if (ioctl(fd, BLKRESETZONE, &za) == -1)
+			err(EXIT_FAILURE, _("%s: BLKRESETZONE ioctl failed"), ctl->devname);
+		else if (ctl->verbose)
+			printf(_("%s: successfully reset in range from %" PRIu64 ", to %" PRIu64),
+				ctl->devname, ctl->offset, ctl->offset + zlen);
+		break;
+	case BLK_ZONE_NO_ACTION:
+	/* fall through */
+	default:
+		errx(EXIT_FAILURE, _("Invalid or NO action specified!"));
+	}
 	close(fd);
 	return 0;
 }
@@ -324,7 +396,8 @@ int main(int argc, char **argv)
 		.devname = NULL,
 		.offset = 0,
 		.count = 0,
-		.length = 0
+		.length = 0,
+		.action = BLK_ZONE_NO_ACTION
 	};
 
 	static const struct option longopts[] = {
